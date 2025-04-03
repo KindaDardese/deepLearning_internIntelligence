@@ -1,6 +1,3 @@
-Here's a comprehensive README.md file for your Image Captioning project, explaining all components and setup instructions:
-
-```markdown
 # Image Captioning with Deep Learning
 
 ![Sample Captions](output_results/sample_images.png)
