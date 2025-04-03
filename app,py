@@ -1,0 +1,562 @@
+import tensorflow as tf
+from tensorflow.keras.mixed_precision import set_global_policy, Policy
+set_global_policy(Policy('mixed_float16'))
+tf.config.optimizer.set_jit(True)
+
+from tensorflow.keras.callbacks import TensorBoard
+tensorboard_callback = TensorBoard(log_dir="logs", histogram_freq=1)
+
+import os
+import numpy as np
+import pandas as pd
+from tqdm import tqdm
+import pickle
+import warnings
+import matplotlib.pyplot as plt
+import seaborn as sns
+from textwrap import wrap
+import optuna
+import time
+import multiprocessing as mp
+import re
+
+from keras._tf_keras.keras.preprocessing.image import ImageDataGenerator, load_img, img_to_array
+from keras._tf_keras.keras.preprocessing.text import Tokenizer
+from keras._tf_keras.keras.preprocessing.sequence import pad_sequences
+from keras._tf_keras.keras.utils import Sequence 
+from keras._tf_keras.keras.utils import to_categorical
+from keras._tf_keras.keras.models import Sequential, Model, load_model
+from keras._tf_keras.keras.layers import Conv2D, MaxPooling2D, GlobalAveragePooling2D, Activation, Dropout, Flatten, Dense, Input, Layer, Add
+from keras._tf_keras.keras.layers import Embedding, LSTM, add, Concatenate, Reshape, concatenate, Bidirectional
+from keras._tf_keras.keras.applications import VGG16, ResNet50, DenseNet201, MobileNetV2, EfficientNetB0
+from keras._tf_keras.keras.optimizers import Adam 
+from keras._tf_keras.keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLROnPlateau
+
+def configure_hardware():
+    """Configure hardware settings for optimal performance"""
+    print("Configuring hardware for optimal performance...")
+    
+    physical_devices = tf.config.list_physical_devices('GPU')
+    if physical_devices:
+        print(f"Found {len(physical_devices)} GPU(s):")
+        for i, device in enumerate(physical_devices):
+            print(f"  GPU {i}: {device.name}")
+            
+        for device in physical_devices:
+            try:
+                tf.config.experimental.set_memory_growth(device, True)
+                print(f"  Memory growth enabled for {device.name}")
+            except:
+                print(f"  Could not set memory growth for {device.name}")
+        
+        try:
+            policy = tf.keras.mixed_precision.Policy('mixed_float16')
+            tf.keras.mixed_precision.set_global_policy(policy)
+            print("Mixed precision training enabled (float16)")
+        except:
+            print("Could not enable mixed precision")
+        
+        return "GPU"
+    else:
+        print("No GPU found, using CPU optimizations")
+        
+        num_cores = mp.cpu_count()
+        print(f"Available CPU cores: {num_cores}")
+        
+        tf.config.threading.set_intra_op_parallelism_threads(num_cores)
+        tf.config.threading.set_inter_op_parallelism_threads(2)
+        
+        os.environ['TF_ENABLE_ONEDNN_OPTS'] = '1'
+        os.environ['TF_CPU_ALLOCATOR_TYPE'] = 'BFC'
+        print(f"CPU optimizations enabled for {num_cores} cores")
+        
+        return "CPU"
+
+def readImage(path, img_size=224):
+    img = load_img(path, color_mode='rgb', target_size=(img_size, img_size))
+    img = img_to_array(img)
+    img = img/255.
+    return img
+
+def display_images(temp_df, output_dir=None):
+    temp_df = temp_df.reset_index(drop=True)
+    plt.figure(figsize=(20, 20))
+    n = 0
+    for i in range(min(15, len(temp_df))):
+        n += 1
+        plt.subplot(5, 5, n)
+        plt.subplots_adjust(hspace=0.7, wspace=0.3)
+        image = readImage(f"Images/{temp_df.image[i]}")
+        plt.imshow(image)
+        plt.title("\n".join(wrap(temp_df.caption[i], 20)))
+        plt.axis("off")
+    
+    if output_dir:
+        plt.savefig(os.path.join(output_dir, "sample_images.png"))
+        plt.close()
+    else:
+        plt.show()
+
+def text_preprocessing(data):
+    data['caption'] = data['caption'].apply(lambda x: x.lower())
+    data['caption'] = data['caption'].apply(lambda x: re.sub(r"[^A-Za-z ]", "", x))
+    data['caption'] = data['caption'].apply(lambda x: x.replace("\s+", " "))
+    data['caption'] = data['caption'].apply(lambda x: " ".join([word for word in x.split() if len(word) > 1]))
+    data['caption'] = "startseq " + data['caption'] + " endseq"
+    return data
+
+@tf.function
+def extract_features(image_path, data, fe, img_size=224, batch_size=32):
+    """Extract features from images using efficient batching"""
+    print("Extracting image features...")
+    start_time = time.time()
+    
+    features = {}
+    unique_images = data['image'].unique().tolist()
+    
+    try:
+        for i in tqdm(range(0, len(unique_images), batch_size)):
+            batch_images = unique_images[i:i+batch_size]
+            actual_batch_size = len(batch_images)
+            batch_input = np.zeros((actual_batch_size, img_size, img_size, 3))
+            
+            for j, image in enumerate(batch_images):
+                img = load_img(os.path.join(image_path, image), target_size=(img_size, img_size))
+                img = img_to_array(img)
+                img = img/255.
+                batch_input[j] = img
+                
+            batch_features = fe.predict(batch_input, verbose=0)
+            
+            for j, image in enumerate(batch_images):
+                features[image] = np.expand_dims(batch_features[j], axis=0)
+    except Exception as e:
+        print(f"Batch processing failed: {e}")
+        print("Falling back to single image processing...")
+        
+        for image in tqdm(unique_images):
+            img = load_img(os.path.join(image_path, image), target_size=(img_size, img_size))
+            img = img_to_array(img)
+            img = img/255.
+            img = np.expand_dims(img, axis=0)
+            feature = fe.predict(img, verbose=0)
+            features[image] = feature
+    
+    end_time = time.time()
+    print(f"Feature extraction completed in {end_time - start_time:.2f} seconds for {len(unique_images)} images")
+    
+    return features
+
+class CustomDataGenerator(Sequence):
+    def __init__(self, df, X_col, y_col, batch_size, directory, tokenizer, 
+                 vocab_size, max_length, features, shuffle=True):
+        self.df = df.copy()
+        self.X_col = X_col
+        self.y_col = y_col
+        self.directory = directory
+        self.batch_size = batch_size
+        self.tokenizer = tokenizer
+        self.vocab_size = vocab_size
+        self.max_length = max_length
+        self.features = features
+        self.shuffle = shuffle
+        self.n = len(self.df)
+        
+    def on_epoch_end(self):
+        if self.shuffle:
+            self.df = self.df.sample(frac=1).reset_index(drop=True)
+    
+    def __len__(self):
+        return self.n // self.batch_size
+    
+    def __getitem__(self, index):
+        batch = self.df.iloc[index * self.batch_size:(index + 1) * self.batch_size, :]
+        X1, X2, y = self.__get_data(batch)        
+        return (X1, X2), y
+    
+    def __get_data(self, batch):
+        X1, X2, y = list(), list(), list()
+        
+        images = batch[self.X_col].tolist()
+           
+        for image in images:
+            feature = self.features[image][0]
+            
+            captions = batch.loc[batch[self.X_col]==image, self.y_col].tolist()
+            for caption in captions:
+                seq = self.tokenizer.texts_to_sequences([caption])[0]
+
+                for i in range(1, len(seq)):
+                    in_seq, out_seq = seq[:i], seq[i]
+                    in_seq = pad_sequences([in_seq], maxlen=self.max_length)[0]
+                    out_seq = to_categorical([out_seq], num_classes=self.vocab_size)[0]
+                    X1.append(feature)
+                    X2.append(in_seq)
+                    y.append(out_seq)
+            
+        X1, X2, y = np.array(X1), np.array(X2), np.array(y)
+                
+        return X1, X2, y
+
+def build_model(embedding_dim, lstm_units, dropout_rate, learning_rate, max_length, vocab_size, feature_size):
+    input1 = Input(shape=(feature_size,))
+    input2 = Input(shape=(max_length,))
+
+    img_features = Dense(embedding_dim, activation='relu')(input1)
+    img_features_reshaped = Reshape((1, embedding_dim))(img_features)
+    
+    sentence_features = Embedding(vocab_size, embedding_dim, mask_zero=False)(input2)
+    merged = concatenate([img_features_reshaped, sentence_features], axis=1)
+    sentence_features = LSTM(lstm_units)(merged)
+
+    img_features_adjusted = Dense(lstm_units)(img_features)
+
+    x = Dropout(dropout_rate)(sentence_features)
+    x = Add()([x, img_features_adjusted])
+
+    x = Dense(128, activation='relu')(x)
+    x = Dropout(dropout_rate)(x)
+    output = Dense(vocab_size, activation='softmax')(x)
+
+    caption_model = Model(inputs=[input1, input2], outputs=output)
+    caption_model.compile(
+        loss='categorical_crossentropy',
+        optimizer=Adam(learning_rate=learning_rate),
+        metrics=['accuracy']
+    )
+    
+    return caption_model
+
+def word_for_id(integer, tokenizer):
+    for word, index in tokenizer.word_index.items():
+        if index == integer:
+            return word
+    return None
+
+@tf.function
+def generate_caption(model, image, tokenizer, max_length, features):
+    caption = 'startseq'
+    
+    for i in range(max_length):
+        sequence = tokenizer.texts_to_sequences([caption])[0]
+        sequence = pad_sequences([sequence], maxlen=max_length)
+        
+        yhat = model.predict([features, sequence], verbose=0)
+        yhat = np.argmax(yhat)
+        word = word_for_id(yhat, tokenizer)
+        
+        if word is None or word == 'endseq':
+            break
+        
+        caption += ' ' + word
+    
+    return caption.replace('startseq ', '').replace(' endseq', '')
+
+def evaluate_model(model, test_data, tokenizer, max_length, features, output_dir=None):
+    print("Evaluating model...")
+    start_time = time.time()
+    
+    actual_captions = []
+    predicted_captions = []
+    image_files = []
+    
+    sample_images = test_data['image'].unique()[:20]
+    
+    for image_file in tqdm(sample_images):
+        actual = test_data.loc[test_data['image'] == image_file, 'caption'].tolist()[0]
+        actual = actual.replace('startseq ', '').replace(' endseq', '')
+        
+        image_features = features[image_file]
+        predicted = generate_caption(model, image_file, tokenizer, max_length, image_features)
+        
+        actual_captions.append(actual)
+        predicted_captions.append(predicted)
+        image_files.append(image_file)
+    
+    results_df = pd.DataFrame({
+        'image': image_files,
+        'actual': actual_captions,
+        'predicted': predicted_captions
+    })
+    
+    plt.figure(figsize=(20, 20))
+    for i in range(min(10, len(results_df))):
+        plt.subplot(5, 2, i+1)
+        image = readImage(f"Images/{results_df.image[i]}")
+        plt.imshow(image)
+        plt.title(f"Actual: {results_df.actual[i]}\nPredicted: {results_df.predicted[i]}")
+        plt.axis('off')
+    
+    if output_dir:
+        plt.savefig(os.path.join(output_dir, "caption_evaluation.png"))
+        plt.close()
+    else:
+        plt.show()
+    
+    end_time = time.time()
+    print(f"Evaluation completed in {end_time - start_time:.2f} seconds")
+    
+    return results_df
+
+def objective(trial, train, test, features, tokenizer, vocab_size, max_length, image_path, feature_size):
+    embedding_dim = trial.suggest_categorical('embedding_dim', [128, 192, 256, 320, 384])
+    lstm_units = trial.suggest_int('lstm_units', 128, 512, step=64)
+    dropout_rate = trial.suggest_float('dropout_rate', 0.1, 0.6, step=0.1)
+    learning_rate = trial.suggest_float('learning_rate', 1e-6, 1e-3, log=True)
+    batch_size = trial.suggest_categorical('batch_size', [32, 64, 96, 128])
+   
+    caption_model = build_model(
+        embedding_dim=embedding_dim,
+        lstm_units=lstm_units,
+        dropout_rate=dropout_rate,
+        learning_rate=learning_rate,
+        max_length=max_length,
+        vocab_size=vocab_size,
+        feature_size=feature_size
+    )
+    
+    train_generator = CustomDataGenerator(
+        df=train, X_col='image', y_col='caption', batch_size=batch_size,
+        directory=image_path, tokenizer=tokenizer, vocab_size=vocab_size,
+        max_length=max_length, features=features
+    )
+    
+    validation_generator = CustomDataGenerator(
+        df=test, X_col='image', y_col='caption', batch_size=batch_size,
+        directory=image_path, tokenizer=tokenizer, vocab_size=vocab_size,
+        max_length=max_length, features=features
+    )
+
+    model_name = "model.keras"
+    checkpoint = ModelCheckpoint(
+        model_name,
+        monitor="val_loss",
+        mode="min",
+        save_best_only=True,
+        save_weights_only=False,
+        verbose=1
+    )
+
+    earlystopping = EarlyStopping(monitor='val_loss', min_delta=0, patience=3, verbose=1, restore_best_weights=True)
+    learning_rate_reduction = ReduceLROnPlateau(monitor='val_loss', patience=3, verbose=1, factor=0.2, min_lr=1e-8)
+
+    history = caption_model.fit(
+        train_generator,
+        epochs=50,
+        validation_data=validation_generator,
+        callbacks=[checkpoint, earlystopping, learning_rate_reduction],
+        verbose=1
+    )
+
+    return history.history['val_loss'][-1]
+
+def optimize_hyperparameters(train, test, features, tokenizer, vocab_size, max_length, image_path, feature_size, n_trials=10):
+    print(f"Starting hyperparameter optimization with {n_trials} trials...")
+    start_time = time.time()
+    
+    study = optuna.create_study(direction='minimize')
+    study.optimize(
+        lambda trial: objective(
+            trial, train, test, features, tokenizer, vocab_size, 
+            max_length, image_path, feature_size
+        ), 
+        n_trials=n_trials
+    )
+
+    print(f"Number of trials completed: {len(study.trials)}")
+    print(f"Best trial number: {study.best_trial.number}")
+    print(f"Best trial parameters: {study.best_trial.params}")
+    print(f"Best validation loss: {study.best_trial.value}")
+    
+    end_time = time.time()
+    print(f"Hyperparameter optimization completed in {(end_time - start_time)/60:.2f} minutes")
+    
+    return study.best_trial.params
+
+def plot_training_history(history, output_dir=None):
+    plt.figure(figsize=(12, 4))
+    
+    plt.subplot(1, 2, 1)
+    plt.plot(history.history['loss'], label='Training Loss')
+    plt.plot(history.history['val_loss'], label='Validation Loss')
+    plt.title('Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+    
+    plt.subplot(1, 2, 2)
+    plt.plot(history.history['accuracy'], label='Training Accuracy')
+    plt.plot(history.history['val_accuracy'], label='Validation Accuracy')
+    plt.title('Accuracy')
+    plt.xlabel('Epoch')
+    plt.ylabel('Accuracy')
+    plt.legend()
+    
+    plt.tight_layout()
+    
+    if output_dir:
+        plt.savefig(os.path.join(output_dir, "training_history.png"))
+        plt.close()
+    else:
+        plt.show()
+
+def main():
+    np.random.seed(42)
+    tf.random.set_seed(42)
+    
+    hardware = configure_hardware()
+    
+    output_dir = 'output_results'
+    os.makedirs(output_dir, exist_ok=True)
+    
+    img_size = 224
+    feature_extractor = 'densenet'
+    
+    image_path = 'Images'
+    data = pd.read_csv("captions.txt")
+    
+    print(f"Dataset contains {len(data)} caption entries for {len(data['image'].unique())} unique images")
+    
+    display_images(data.sample(15), output_dir)
+    
+    print("Preprocessing captions...")
+    data = text_preprocessing(data)
+    captions = data['caption'].tolist()
+    
+    print("Tokenizing captions...")
+    tokenizer = Tokenizer()
+    tokenizer.fit_on_texts(captions)
+    vocab_size = len(tokenizer.word_index) + 1
+    max_length = max(len(seq) for seq in tokenizer.texts_to_sequences(captions))
+    
+    print(f"Vocabulary size: {vocab_size}, Maximum caption length: {max_length}")
+    
+    with open(os.path.join(output_dir, 'tokenizer.pickle'), 'wb') as handle:
+        pickle.dump(tokenizer, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    
+    images = data['image'].unique().tolist()
+    nimages = len(images)
+    
+    split_index = round(0.85 * nimages)
+    train_images = images[:split_index]
+    val_images = images[split_index:]
+    
+    train = data[data['image'].isin(train_images)]
+    test = data[data['image'].isin(val_images)]
+    
+    train.reset_index(inplace=True, drop=True)
+    test.reset_index(inplace=True, drop=True)
+    
+    feature_file = os.path.join(output_dir, f'{feature_extractor}_features.pkl')
+    
+    if os.path.exists(feature_file):
+        print(f"Loading pre-computed features from {feature_file}")
+        with open(feature_file, 'rb') as f:
+            features = pickle.load(f)
+        
+        first_image = list(features.keys())[0]
+        feature_size = features[first_image].shape[1]
+        print(f"Loaded features with size: {feature_size}")
+    else:
+        print(f"Extracting features using {feature_extractor.upper()}...")
+        
+        if feature_extractor == 'densenet':
+            model = DenseNet201(weights='imagenet', include_top=False, pooling='avg')
+        elif feature_extractor == 'resnet':
+            model = ResNet50(weights='imagenet', include_top=False, pooling='avg')
+        elif feature_extractor == 'mobilenet':
+            model = MobileNetV2(weights='imagenet', include_top=False, pooling='avg')
+        else:
+            model = EfficientNetB0(weights='imagenet', include_top=False, pooling='avg')
+        
+        features = extract_features(image_path, data, model, img_size)
+        
+        with open(feature_file, 'wb') as f:
+            pickle.dump(features, f)
+    
+    print("\nDataset Information:")
+    print(f"Total number of images: {nimages}")
+    print(f"Training images: {len(train_images)}")
+    print(f"Validation images: {len(val_images)}")
+    print(f"Vocabulary size: {vocab_size}")
+    print(f"Maximum sequence length: {max_length}")
+    print(f"Feature vector size: {feature_size}")
+    
+    run_optimization = input("Run hyperparameter optimization? (y/n): ").lower() == 'y'
+    
+    if run_optimization:
+        print("Optimizing hyperparameters...")
+        best_params = optimize_hyperparameters(
+            train, test, features, tokenizer, vocab_size, 
+            max_length, image_path, feature_size, n_trials=5
+        )
+    else:
+        best_params = {
+            'embedding_dim': 256,
+            'lstm_units': 256,
+            'dropout_rate': 0.5,
+            'learning_rate': 1e-5,
+            'batch_size': 64
+        }
+        print("Using predefined hyperparameters:", best_params)
+    
+    print("\nTraining final model with best parameters...")
+    # Remove batch_size from parameters passed to build_model
+    model_params = {k: v for k, v in best_params.items() if k != 'batch_size'}
+    final_model = build_model(
+        **model_params,
+        max_length=max_length,
+        vocab_size=vocab_size,
+        feature_size=feature_size
+    )
+    
+    final_model.summary()
+    
+    train_generator = CustomDataGenerator(
+        df=train, X_col='image', y_col='caption', batch_size=best_params['batch_size'],
+        directory=image_path, tokenizer=tokenizer, vocab_size=vocab_size,
+        max_length=max_length, features=features
+    )
+    
+    validation_generator = CustomDataGenerator(
+        df=test, X_col='image', y_col='caption', batch_size=best_params['batch_size'],
+        directory=image_path, tokenizer=tokenizer, vocab_size=vocab_size,
+        max_length=max_length, features=features
+    )
+    
+    model_name = os.path.join(output_dir, "best_model.keras")
+    checkpoint = ModelCheckpoint(
+        model_name,
+        monitor="val_loss",
+        mode="min",
+        save_best_only=True,
+        save_weights_only=False,
+        verbose=1
+    )
+    
+    earlystopping = EarlyStopping(monitor='val_loss', min_delta=0, patience=5, verbose=1, restore_best_weights=True)
+    learning_rate_reduction = ReduceLROnPlateau(monitor='val_loss', patience=3, verbose=1, factor=0.2, min_lr=1e-8)
+    
+    start_time = time.time()
+    
+    history = final_model.fit(
+        train_generator,
+        epochs=50,
+        validation_data=validation_generator,
+        callbacks=[checkpoint, earlystopping, learning_rate_reduction],
+        verbose=1
+    )
+    
+    end_time = time.time()
+    print(f"Model training completed in {(end_time - start_time)/60:.2f} minutes")
+    
+    print("Evaluating final model...")
+    evaluation_results = evaluate_model(final_model, test, tokenizer, max_length, features, output_dir)
+    
+    print("Plotting training history...")
+    plot_training_history(history, output_dir)
+    
+    print("Process completed!")
+
+if __name__ == "__main__":
+    main()
