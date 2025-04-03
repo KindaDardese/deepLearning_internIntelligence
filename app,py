@@ -1,11 +1,4 @@
 import tensorflow as tf
-from tensorflow.keras.mixed_precision import set_global_policy, Policy
-set_global_policy(Policy('mixed_float16'))
-tf.config.optimizer.set_jit(True)
-
-from tensorflow.keras.callbacks import TensorBoard
-tensorboard_callback = TensorBoard(log_dir="logs", histogram_freq=1)
-
 import os
 import numpy as np
 import pandas as pd
@@ -496,12 +489,11 @@ def main():
             'lstm_units': 256,
             'dropout_rate': 0.5,
             'learning_rate': 1e-5,
-            'batch_size': 64
+            'batch_size': 32
         }
         print("Using predefined hyperparameters:", best_params)
     
     print("\nTraining final model with best parameters...")
-    # Remove batch_size from parameters passed to build_model
     model_params = {k: v for k, v in best_params.items() if k != 'batch_size'}
     final_model = build_model(
         **model_params,
