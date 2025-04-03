@@ -4,6 +4,12 @@ An end-to-end deep learning system that generates natural language descriptions 
 ## Table of Contents
 - [Features](#features)
 - [Architecture](#architecture)
+- [Key Parameters](#key-parameters)
+- [Hardware Configuration](#hardware-configuration)
+- [Results](#results)
+- [Common Issues](#common-issues)
+- [Hyperparameter Optimization](#hyperparameter-optimization)
+- [Production Considerations](#production-considerations)
 
 ## Features
 
@@ -32,7 +38,7 @@ The system combines two main components:
 Input Image → CNN Features → LSTM → Generated Caption
 ```
 
-### Key Parameters
+## Key Parameters
 ```
 DEFAULT_PARAMS = {
     'embedding_dim': 256,     # Word embedding dimension
@@ -43,16 +49,16 @@ DEFAULT_PARAMS = {
 }
 ```
 
-### Hardware Configuration
+## Hardware Configuration
 The script automatically:
 - Enables GPU memory growth
 - Sets optimal CPU threading
 - Enables XLA compilation
 
-### Results
+## Results
 ![Training Curves](output_results/training_history.png)
 
-### Common Issues
+## Common Issues
 
 1. **CUDA Out of Memory**
    - Reduce batch size (start with 16)
@@ -69,14 +75,14 @@ The script automatically:
    - Adjust LSTM units (128-512)
    - Try different feature extractors
 
-### Hyperparameter Optimization
+## Hyperparameter Optimization
 Optuna searches:
 - LSTM units (128-512)
 - Dropout rates (0.1-0.6)
 - Learning rates (1e-6 to 1e-3)
 - Batch sizes (16-128)
 
-### Production Considerations
+## Production Considerations
 - The saved model includes:
   - Architecture definition
   - Trained weights
