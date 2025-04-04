@@ -62,15 +62,19 @@ An end-to-end deep learning pipeline that generates natural language description
 ## Advanced Usage
 
 ### Hyperparameter Search
+```
 Optuna explores:
 - LSTM units: 128-512
 - Learning rates: 1e-6 to 1e-3
 - Batch sizes: 16-128
 - Dropout rates: 0.1-0.6
+```
 
 ### Production Deployment
+```
 Saved model package includes:
 - Architecture definition (.keras)
 - Trained weights
 - Tokenizer configuration (.pkl)
 - Example inference script
+```
