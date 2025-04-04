@@ -11,7 +11,6 @@ from textwrap import wrap
 import optuna
 import time
 import multiprocessing as mp
-import re
 
 from keras._tf_keras.keras.preprocessing.image import ImageDataGenerator, load_img, img_to_array
 from keras._tf_keras.keras.preprocessing.text import Tokenizer
@@ -92,13 +91,12 @@ def display_images(temp_df, output_dir=None):
 
 def text_preprocessing(data):
     data['caption'] = data['caption'].apply(lambda x: x.lower())
-    data['caption'] = data['caption'].apply(lambda x: re.sub(r"[^A-Za-z ]", "", x))
+    data['caption'] = data['caption'].apply(lambda x: x.replace("[^A-Za-z]", ""))
     data['caption'] = data['caption'].apply(lambda x: x.replace("\s+", " "))
     data['caption'] = data['caption'].apply(lambda x: " ".join([word for word in x.split() if len(word) > 1]))
     data['caption'] = "startseq " + data['caption'] + " endseq"
     return data
 
-@tf.function
 def extract_features(image_path, data, fe, img_size=224, batch_size=32):
     """Extract features from images using efficient batching"""
     print("Extracting image features...")
@@ -191,7 +189,7 @@ class CustomDataGenerator(Sequence):
                 
         return X1, X2, y
 
-def build_model(embedding_dim, lstm_units, dropout_rate, learning_rate, max_length, vocab_size, feature_size):
+def build_model(embedding_dim, lstm_units, dropout_rate, learning_rate, max_length, vocab_size, feature_size=1920):
     input1 = Input(shape=(feature_size,))
     input2 = Input(shape=(max_length,))
 
@@ -226,7 +224,6 @@ def word_for_id(integer, tokenizer):
             return word
     return None
 
-@tf.function
 def generate_caption(model, image, tokenizer, max_length, features):
     caption = 'startseq'
     
@@ -292,21 +289,13 @@ def evaluate_model(model, test_data, tokenizer, max_length, features, output_dir
     return results_df
 
 def objective(trial, train, test, features, tokenizer, vocab_size, max_length, image_path, feature_size):
-    embedding_dim = trial.suggest_categorical('embedding_dim', [128, 192, 256, 320, 384])
-    lstm_units = trial.suggest_int('lstm_units', 128, 512, step=64)
-    dropout_rate = trial.suggest_float('dropout_rate', 0.1, 0.6, step=0.1)
-    learning_rate = trial.suggest_float('learning_rate', 1e-6, 1e-3, log=True)
-    batch_size = trial.suggest_categorical('batch_size', [32, 64, 96, 128])
+    embedding_dim = trial.suggest_categorical('embedding_dim', [128, 256])
+    lstm_units = trial.suggest_int('lstm_units', 128, 256, step=32)
+    dropout_rate = trial.suggest_uniform('dropout_rate', 0.2, 0.5)
+    learning_rate = trial.suggest_loguniform('learning_rate', 1e-5, 1e-3)
+    batch_size = trial.suggest_categorical('batch_size', [32, 64])
    
-    caption_model = build_model(
-        embedding_dim=embedding_dim,
-        lstm_units=lstm_units,
-        dropout_rate=dropout_rate,
-        learning_rate=learning_rate,
-        max_length=max_length,
-        vocab_size=vocab_size,
-        feature_size=feature_size
-    )
+    caption_model = build_model(embedding_dim, lstm_units, dropout_rate, learning_rate, max_length, vocab_size, feature_size)
     
     train_generator = CustomDataGenerator(
         df=train, X_col='image', y_col='caption', batch_size=batch_size,
@@ -335,7 +324,7 @@ def objective(trial, train, test, features, tokenizer, vocab_size, max_length, i
 
     history = caption_model.fit(
         train_generator,
-        epochs=50,
+        epochs=10,
         validation_data=validation_generator,
         callbacks=[checkpoint, earlystopping, learning_rate_reduction],
         verbose=1
@@ -420,9 +409,7 @@ def main():
     tokenizer = Tokenizer()
     tokenizer.fit_on_texts(captions)
     vocab_size = len(tokenizer.word_index) + 1
-    max_length = max(len(seq) for seq in tokenizer.texts_to_sequences(captions))
-    
-    print(f"Vocabulary size: {vocab_size}, Maximum caption length: {max_length}")
+    max_length = max(len(caption.split()) for caption in captions)
     
     with open(os.path.join(output_dir, 'tokenizer.pickle'), 'wb') as handle:
         pickle.dump(tokenizer, handle, protocol=pickle.HIGHEST_PROTOCOL)
@@ -455,14 +442,18 @@ def main():
         
         if feature_extractor == 'densenet':
             model = DenseNet201(weights='imagenet', include_top=False, pooling='avg')
+            feature_size = 1920
         elif feature_extractor == 'resnet':
             model = ResNet50(weights='imagenet', include_top=False, pooling='avg')
+            feature_size = 2048
         elif feature_extractor == 'mobilenet':
             model = MobileNetV2(weights='imagenet', include_top=False, pooling='avg')
-        else:
+            feature_size = 1280
+        elif feature_extractor == 'efficientnet':
             model = EfficientNetB0(weights='imagenet', include_top=False, pooling='avg')
+            feature_size = 1280
         
-        features = extract_features(image_path, data, model, img_size)
+        features = extract_features(image_path, data, model, img_size, batch_size=32)
         
         with open(feature_file, 'wb') as f:
             pickle.dump(features, f)
@@ -478,7 +469,6 @@ def main():
     run_optimization = input("Run hyperparameter optimization? (y/n): ").lower() == 'y'
     
     if run_optimization:
-        print("Optimizing hyperparameters...")
         best_params = optimize_hyperparameters(
             train, test, features, tokenizer, vocab_size, 
             max_length, image_path, feature_size, n_trials=5
@@ -487,19 +477,21 @@ def main():
         best_params = {
             'embedding_dim': 256,
             'lstm_units': 256,
-            'dropout_rate': 0.5,
-            'learning_rate': 1e-5,
-            'batch_size': 32
+            'dropout_rate': 0.3,
+            'learning_rate': 0.0001,
+            'batch_size': 64
         }
         print("Using predefined hyperparameters:", best_params)
     
     print("\nTraining final model with best parameters...")
-    model_params = {k: v for k, v in best_params.items() if k != 'batch_size'}
     final_model = build_model(
-        **model_params,
-        max_length=max_length,
-        vocab_size=vocab_size,
-        feature_size=feature_size
+        best_params['embedding_dim'],
+        best_params['lstm_units'],
+        best_params['dropout_rate'],
+        best_params['learning_rate'],
+        max_length,
+        vocab_size,
+        feature_size
     )
     
     final_model.summary()
@@ -533,7 +525,7 @@ def main():
     
     history = final_model.fit(
         train_generator,
-        epochs=50,
+        epochs=20,
         validation_data=validation_generator,
         callbacks=[checkpoint, earlystopping, learning_rate_reduction],
         verbose=1
@@ -542,13 +534,24 @@ def main():
     end_time = time.time()
     print(f"Model training completed in {(end_time - start_time)/60:.2f} minutes")
     
-    print("Evaluating final model...")
-    evaluation_results = evaluate_model(final_model, test, tokenizer, max_length, features, output_dir)
-    
-    print("Plotting training history...")
     plot_training_history(history, output_dir)
     
-    print("Process completed!")
+    try:
+        print(f"Loading best model from {model_name}")
+        final_model = load_model(model_name)
+    except:
+        print("Could not load best model, using current model")
+    
+    results = evaluate_model(final_model, test, tokenizer, max_length, features, output_dir)
+    results.to_csv(os.path.join(output_dir, 'evaluation_results.csv'), index=False)
+    
+    print(f"\nModel training and evaluation complete. Results saved to {output_dir}")
+    print("\nExample generated captions:")
+    for i in range(min(5, len(results))):
+        print(f"Image: {results.image[i]}")
+        print(f"  Actual: {results.actual[i]}")
+        print(f"  Predicted: {results.predicted[i]}")
+        print()
 
 if __name__ == "__main__":
     main()

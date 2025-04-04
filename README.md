@@ -1,89 +1,76 @@
-# Image Captioning with Deep Learning
-An end-to-end deep learning system that generates natural language descriptions of images using a CNN-LSTM architecture with hyperparameter optimization.
+# Image Captioning with CNN-LSTM Architecture
+
+![Sample Output](output_results/caption_evaluation.png)
+
+An end-to-end deep learning pipeline that generates natural language descriptions of images, featuring automatic hardware optimization and hyperparameter tuning.
 
 ## Table of Contents
-- [Features](#features)
-- [Architecture](#architecture)
-- [Key Parameters](#key-parameters)
-- [Hardware Configuration](#hardware-configuration)
-- [Results](#results)
-- [Common Issues](#common-issues)
-- [Hyperparameter Optimization](#hyperparameter-optimization)
-- [Production Considerations](#production-considerations)
+- [Key Features](#key-features)
+- [System Architecture](#system-architecture)
+- [Configuration](#configuration)
+- [Troubleshooting](#troubleshooting)
+- [Advanced Usage](#advanced-usage)
 
-## Features
+## Key Features
 
-- **Multi-model Support**: Choose between DenseNet201, ResNet50, MobileNetV2, or EfficientNetB0 for feature extraction
-- **Hyperparameter Optimization**: Automated tuning with Optuna
-- **Hardware Optimization**: Automatic GPU/CPU configuration with mixed precision training
-- **Memory Efficient**: Custom data generator handles large datasets
-- **Visualization**: Training metrics and sample predictions
+- **Flexible Backbones**: Switch between DenseNet201 (default), ResNet50, MobileNetV2, or EfficientNetB0
+- **Intelligent Training**:
+  - Automatic mixed precision training (FP16/FP32)
+  - Optuna-powered hyperparameter optimization
+  - Memory-efficient data pipeline
+- **Production Ready**:
+  - Complete model packages (architecture + weights + tokenizer)
+  - Training visualization and evaluation metrics
+  - GPU/CPU auto-configuration
 
-## Architecture
+## System Architecture
 
-The system combines two main components:
-
-1. **CNN Encoder** (Feature Extraction):
-   - Pre-trained on ImageNet
-   - Extracts 2048-dim feature vectors (DenseNet201)
-   - Global average pooling final layer
-
-2. **LSTM Decoder** (Caption Generation):
-   - Word embedding layer
-   - LSTM with attention mechanism
-   - Dense layers with dropout
-   - Softmax output over vocabulary
-
+### Feature Extraction Pipeline
 ```
-Input Image → CNN Features → LSTM → Generated Caption
+    A [Input Image] --> B[224x224 Normalization]
+    B --> C[CNN Feature Extraction]
+    C --> D[2048-dim Feature Vector]
 ```
 
-## Key Parameters
+### Caption Generation
 ```
-DEFAULT_PARAMS = {
-    'embedding_dim': 256,     # Word embedding dimension
-    'lstm_units': 256,        # LSTM layer size
-    'dropout_rate': 0.5,      # Dropout for regularization
-    'learning_rate': 1e-5,    # Initial learning rate
-    'batch_size': 32          # Reduce if OOM errors occur
-}
+    D [Feature Vector] --> E[Word Embedding]
+    E --> F[Attention LSTM]
+    F --> G[Word Prediction]
+    G --> H[Generated Caption]
 ```
 
-## Hardware Configuration
-The script automatically:
-- Enables GPU memory growth
-- Sets optimal CPU threading
-- Enables XLA compilation
+## Configuration
 
-## Results
-![Training Curves](output_results/training_history.png)
+### Core Parameters
+| Parameter         | Range          | Default | Description                     |
+|-------------------|----------------|---------|---------------------------------|
+| `embedding_dim`   | 128-384        | 256     | Word embedding size            |
+| `lstm_units`      | 128-512        | 256     | LSTM layer capacity            |
+| `dropout_rate`    | 0.1-0.6        | 0.3     | Regularization strength        |
+| `batch_size`      | 16-128         | 32      | Adjust based on GPU memory     |
 
-## Common Issues
 
-1. **CUDA Out of Memory**
-   - Reduce batch size (start with 16)
-   - Use smaller model (MobileNetV2)
-   - Enable gradient accumulation
+## Troubleshooting
 
-2. **Slow Training**
-   - Verify GPU utilization (`nvidia-smi`)
-   - Disable eager execution: `tf.config.run_functions_eagerly(False)`
-   - Use `TF_DATA_EXPERIMENT_OPT=1` environment variable
+| Symptom               | Solution                                  | Verification               |
+|-----------------------|------------------------------------------|----------------------------|
+| CUDA Out of Memory    | Reduce batch size, use MobileNetV2       | `nvidia-smi` monitoring    |
+| Slow Training         | Enable XLA, verify GPU usage             | Check GPU utilization      |
+| Poor Caption Quality  | Increase data, tune LSTM units           | BLEU score evaluation      |
 
-3. **Poor Caption Quality**
-   - Increase dataset size
-   - Adjust LSTM units (128-512)
-   - Try different feature extractors
+## Advanced Usage
 
-## Hyperparameter Optimization
-Optuna searches:
-- LSTM units (128-512)
-- Dropout rates (0.1-0.6)
-- Learning rates (1e-6 to 1e-3)
-- Batch sizes (16-128)
+### Hyperparameter Search
+Optuna explores:
+- LSTM units: 128-512
+- Learning rates: 1e-6 to 1e-3
+- Batch sizes: 16-128
+- Dropout rates: 0.1-0.6
 
-## Production Considerations
-- The saved model includes:
-  - Architecture definition
-  - Trained weights
-  - Tokenizer configuration
+### Production Deployment
+Saved model package includes:
+- Architecture definition (.keras)
+- Trained weights
+- Tokenizer configuration (.pkl)
+- Example inference script
