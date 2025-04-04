@@ -1,12 +1,12 @@
 import os
 import streamlit as st
 import numpy as np
-from tensorflow.keras.preprocessing.sequence import pad_sequences
-from tensorflow.keras.models import load_model
-from tensorflow.keras.preprocessing.image import load_img, img_to_array
+from keras._tf_keras.keras.preprocessing.sequence import pad_sequences
+from keras._tf_keras.keras.models import load_model
+from keras._tf_keras.keras.preprocessing.image import load_img, img_to_array
 import pickle
 from PIL import Image
-from tensorflow.keras.applications import DenseNet201
+from keras._tf_keras.keras.applications import DenseNet201
 
 # Suppress TensorFlow warnings
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
