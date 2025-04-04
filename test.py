@@ -8,24 +8,20 @@ import pickle
 from PIL import Image
 from keras._tf_keras.keras.applications import DenseNet201
 
-# Suppress TensorFlow warnings
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
 @st.cache_resource
 def load_models():
     """Load the captioning model and tokenizer"""
     try:
-        # Load caption generation model
         caption_model = load_model("output_results/best_model.keras")
         
-        # Initialize feature extractor
         feature_extractor = DenseNet201(
             weights='imagenet',
             include_top=False,
             pooling='avg'
         )
         
-        # Load tokenizer
         with open("output_results/tokenizer.pickle", "rb") as f:
             tokenizer = pickle.load(f)
             
@@ -46,16 +42,13 @@ def generate_caption(image, max_length=34):
         return "Model loading failed - please check error messages above"
     
     try:
-        # Preprocess image
         img = Image.open(image)
         img = img.resize((224, 224))
         img = img_to_array(img) / 255.0
         img = np.expand_dims(img, axis=0)
         
-        # Extract features
         features = feature_extractor.predict(img, verbose=0)
         
-        # Generate caption
         caption = 'startseq'
         for _ in range(max_length):
             sequence = tokenizer.texts_to_sequences([caption])[0]
@@ -88,20 +81,17 @@ def main():
     """)
     
     with st.sidebar:
-        st.header("Settings")
-        max_length = st.slider(
-            "Maximum caption length", 
-            min_value=10,
-            max_value=50,
-            value=34,
-            help="Longer captions may be less accurate"
-        )
-        
+        st.markdown("## 🧠 Model Overview")
+        st.markdown("- **🔧 Backbone:** DenseNet201")
+        st.markdown("- **🧮 Decoder:** LSTM with Attention")
+        st.markdown("- **📐 Input Size:** 224 × 224 pixels")
+
         st.markdown("---")
-        st.markdown("**Model Information**")
-        st.markdown("- **Backbone**: DenseNet201")
-        st.markdown("- **Decoder**: LSTM with Attention")
-        st.markdown("- **Input Size**: 224×224 pixels")
+
+        st.markdown("## 📊 Results")
+        with st.expander("🔍 Click to Expand Image"):
+            st.image("output_results/training_history.png", caption="Training History", use_container_width=True)
+
     
     uploaded_file = st.file_uploader(
         "Choose an image file (JPG, JPEG, PNG)",
@@ -122,12 +112,11 @@ def main():
             
             if st.button("✨ Generate Caption", type="primary", use_container_width=True):
                 with st.spinner("Generating caption..."):
-                    caption = generate_caption(uploaded_file, max_length)
+                    caption = generate_caption(uploaded_file)
                 
                 st.subheader("Generated Caption:")
                 st.success(caption)
                 
-                # Store in session state
                 if 'history' not in st.session_state:
                     st.session_state.history = []
                 st.session_state.history.append((uploaded_file.name, caption))
