@@ -139,8 +139,7 @@ def extract_features(image_path, data, fe, img_size=224, batch_size=32):
     return features
 
 class CustomDataGenerator(Sequence):
-    def __init__(self, df, X_col, y_col, batch_size, directory, tokenizer, 
-                 vocab_size, max_length, features, shuffle=True):
+    def __init__(self, df, X_col, y_col, batch_size, directory, tokenizer, vocab_size, max_length, features, shuffle=True):
         self.df = df.copy()
         self.X_col = X_col
         self.y_col = y_col
